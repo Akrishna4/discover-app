@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3'
 import path from 'path'
 import fs from 'fs'
+import crypto from 'crypto'
 
 const DATA_DIR = path.join(process.cwd(), 'data')
 const DB_PATH = path.join(DATA_DIR, 'coy.db')
@@ -13,6 +14,14 @@ const db = new Database(DB_PATH)
 
 db.pragma('journal_mode = WAL')
 db.pragma('foreign_keys = ON')
+
+// Register deterministic hash function for stable feed shuffling
+db.function('feed_hash', (id: unknown, seed: unknown) => {
+  return crypto
+    .createHash('sha256')
+    .update(`${String(id)}:${String(seed)}`)
+    .digest('hex')
+})
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS profiles (
@@ -38,6 +47,11 @@ db.exec(`
     user_b TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(user_a, user_b)
+  );
+
+  CREATE TABLE IF NOT EXISTS app_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
   );
 `)
 
@@ -89,13 +103,14 @@ const seedProfilesTx = db.transaction(() => {
 })
 seedProfilesTx()
 
-// Seed liked-me swipes (8-10 profiles as having ALREADY liked "me")
+// Seed liked-me swipes: 9 profiles spread across the entire ID range.
+// Specifically ensures p01 and the first few cards are NOT liked-me.
+export const likedMeIds = ['p04', 'p07', 'p11', 'p14', 'p19', 'p22', 'p26', 'p29', 'p31']
+
 const seedSwipe = db.prepare(`
   INSERT OR IGNORE INTO swipes (from_user, to_user, action, created_at)
   VALUES (?, 'me', 'like', datetime('now'))
 `)
-
-export const likedMeIds = ['p01', 'p03', 'p05', 'p07', 'p09', 'p11', 'p13', 'p15', 'p17']
 
 const seedSwipesTx = db.transaction(() => {
   for (const id of likedMeIds) {
@@ -104,8 +119,33 @@ const seedSwipesTx = db.transaction(() => {
 })
 seedSwipesTx()
 
-export function resetDb(): void {
+// Feed seed management for stable, reload-persistent shuffle
+export function getFeedSeed(): string {
+  const row = db
+    .prepare("SELECT value FROM app_meta WHERE key = 'feed_seed'")
+    .get() as { value: string } | undefined
+  if (row) return row.value
+
+  const newSeed = crypto.randomUUID()
+  db.prepare("INSERT INTO app_meta (key, value) VALUES ('feed_seed', ?)").run(newSeed)
+  return newSeed
+}
+
+export function setFeedSeed(seed: string): void {
+  db.prepare(`
+    INSERT INTO app_meta (key, value) VALUES ('feed_seed', ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).run(seed)
+}
+
+// Initialize feed seed on startup
+getFeedSeed()
+
+export function resetDb(customSeed?: string): void {
   db.exec(`DELETE FROM swipes; DELETE FROM matches;`)
+  const newSeed = customSeed || crypto.randomUUID()
+  setFeedSeed(newSeed)
+
   const resetSwipesTx = db.transaction(() => {
     for (const id of likedMeIds) {
       seedSwipe.run(id)

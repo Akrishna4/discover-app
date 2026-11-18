@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import db, { resetDb } from '@/lib/db'
+import db, { resetDb, likedMeIds, setFeedSeed } from '@/lib/db'
 import { getFeed, recordSwipe, getMatches } from '@/lib/swipeService'
 import { POST as swipeRoute } from '@/app/api/swipe/route'
 import { NextRequest } from 'next/server'
@@ -81,13 +81,12 @@ describe('Coy Swipe Service & Privacy Rules', () => {
   })
 
   it('6. feed response never contains liked-me info or leaks liked-me set', () => {
-    // Re-seed liked-me set
     resetDb()
 
     const feed = getFeed('me')
     expect(feed.length).toBeGreaterThan(0)
 
-    // Exactly allowed Profile fields: id, name, age, photo, bio, location, interests
+    // Strictly allowed Profile fields: id, name, age, photo, bio, location, interests
     const allowedKeys = new Set(['id', 'name', 'age', 'photo', 'bio', 'location', 'interests'])
 
     for (const profile of feed) {
@@ -95,7 +94,7 @@ describe('Coy Swipe Service & Privacy Rules', () => {
       for (const key of keys) {
         expect(allowedKeys.has(key)).toBe(true)
       }
-      // Ensure no sneaky fields like 'liked_me', 'mutual', 'swipe_status'
+      // Ensure zero metadata leaks
       expect((profile as any).liked_me).toBeUndefined()
       expect((profile as any).likedMe).toBeUndefined()
       expect((profile as any).hasLiked).toBeUndefined()
@@ -103,15 +102,65 @@ describe('Coy Swipe Service & Privacy Rules', () => {
     }
   })
 
-  it('7. feed order does not favour liked-me profiles (deterministic id order)', () => {
-    resetDb()
-    const feed = getFeed('me')
-    const ids = feed.map((p) => p.id)
-    const sortedIds = [...ids].sort()
-    expect(ids).toEqual(sortedIds)
+  it('7. feed ordering is stable across reloads for the same session seed', () => {
+    setFeedSeed('test-stable-seed-123')
+    const feed1 = getFeed('me').map((p) => p.id)
+    const feed2 = getFeed('me').map((p) => p.id)
+
+    expect(feed1).toEqual(feed2)
+
+    // Different seed produces a different shuffle
+    setFeedSeed('test-stable-seed-456')
+    const feed3 = getFeed('me').map((p) => p.id)
+    expect(feed1).not.toEqual(feed3)
   })
 
-  it('8. matches returns only mutual matches', () => {
+  it('8. seed data spreads liked-me profiles and p01 is NOT liked-me', () => {
+    expect(likedMeIds).toHaveLength(9)
+    // First profiles in the catalogue are not liked-me
+    expect(likedMeIds).not.toContain('p01')
+    expect(likedMeIds).not.toContain('p02')
+    expect(likedMeIds).not.toContain('p03')
+
+    // Profiles are distributed across the 32 range
+    const numbers = likedMeIds.map((id) => parseInt(id.replace('p', ''), 10))
+    expect(Math.min(...numbers)).toBeGreaterThanOrEqual(4)
+    expect(Math.max(...numbers)).toBeGreaterThanOrEqual(30)
+  })
+
+  it('9. liked-me profiles are not disproportionately in the first N feed positions across seeds', () => {
+    resetDb()
+    const likedSet = new Set(likedMeIds)
+    const testSeeds = [
+      'seed-alpha-01',
+      'seed-beta-02',
+      'seed-gamma-03',
+      'seed-delta-04',
+      'seed-epsilon-05',
+      'seed-zeta-06',
+      'seed-eta-07',
+      'seed-theta-08',
+    ]
+
+    let totalLikedInFirst5 = 0
+
+    for (const seed of testSeeds) {
+      setFeedSeed(seed)
+      const feed = getFeed('me')
+      const first5 = feed.slice(0, 5)
+
+      const likedInFirst5 = first5.filter((p) => likedSet.has(p.id)).length
+      // In every seed test, fewer than half (i.e. <= 2 out of 5) of the first 5 cards are liked-me
+      expect(likedInFirst5).toBeLessThanOrEqual(2)
+      totalLikedInFirst5 += likedInFirst5
+    }
+
+    // Average across 8 seeds should be close to base rate (~9/32 * 5 = 1.4)
+    const averageInFirst5 = totalLikedInFirst5 / testSeeds.length
+    expect(averageInFirst5).toBeLessThan(2.0)
+  })
+
+  it('10. matches returns only mutual matches', () => {
     // 1. One-way like: 'me' likes p01 (who has not liked 'me')
     recordSwipe('me', 'p01', 'like')
     expect(getMatches('me')).toHaveLength(0)
@@ -129,11 +178,11 @@ describe('Coy Swipe Service & Privacy Rules', () => {
     expect(matches[0].profile.id).toBe('p06')
   })
 
-  it('9. unknown profile throws PROFILE_NOT_FOUND', () => {
+  it('11. unknown profile throws PROFILE_NOT_FOUND', () => {
     expect(() => recordSwipe('me', 'non_existent_profile', 'like')).toThrow('PROFILE_NOT_FOUND')
   })
 
-  it('10. invalid swipe action is rejected by DB constraint', () => {
+  it('12. invalid swipe action is rejected by DB constraint', () => {
     expect(() => {
       db.prepare(
         `INSERT INTO swipes (from_user, to_user, action, created_at) VALUES ('me', 'p10', 'superlike', datetime('now'))`
@@ -141,7 +190,7 @@ describe('Coy Swipe Service & Privacy Rules', () => {
     }).toThrow()
   })
 
-  it('11. API route /api/swipe validation (400 bad body, 404 unknown profile, 409 duplicate)', async () => {
+  it('13. API route /api/swipe validation (400 bad body, 404 unknown profile, 409 duplicate)', async () => {
     // 400 bad body (missing action)
     const req1 = new NextRequest('http://localhost:3000/api/swipe', {
       method: 'POST',

@@ -1,4 +1,4 @@
-import db from './db'
+import db, { getFeedSeed } from './db'
 import type { Profile, SwipeAction, SwipeResponse, Match } from '@/types'
 
 function rowToProfile(row: Record<string, unknown>): Profile {
@@ -16,7 +16,8 @@ function rowToProfile(row: Record<string, unknown>): Profile {
 export function getFeed(userId: string): Profile[] {
   // Profiles that userId has NOT swiped on.
   // Never include any field that hints whether a profile liked "me".
-  // Order must not favour liked-me profiles (ordered by id).
+  // Order must not favour liked-me profiles (stable shuffle using session_seed).
+  const sessionSeed = getFeedSeed()
   const rows = db
     .prepare(
       `SELECT id, name, age, photo, bio, location, interests_json
@@ -25,9 +26,9 @@ export function getFeed(userId: string): Profile[] {
          SELECT to_user FROM swipes WHERE from_user = ?
        )
        AND id != ?
-       ORDER BY id`
+       ORDER BY feed_hash(id, ?)`
     )
-    .all(userId, userId) as Record<string, unknown>[]
+    .all(userId, userId, sessionSeed) as Record<string, unknown>[]
 
   return rows.map(rowToProfile)
 }
@@ -46,7 +47,7 @@ export function recordSwipe(
   }
 
   const recordSwipeTx = db.transaction((): SwipeResponse => {
-    // Check for duplicate swipe (or let primary key constraint handle it)
+    // Check for duplicate swipe
     const existing = db
       .prepare('SELECT action FROM swipes WHERE from_user = ? AND to_user = ?')
       .get(fromUser, toUser)

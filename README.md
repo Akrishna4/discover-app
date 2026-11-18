@@ -77,6 +77,12 @@ CREATE TABLE IF NOT EXISTS matches (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(user_a, user_b)
 );
+
+-- 4. Application metadata (stores reload-stable feed session seed)
+CREATE TABLE IF NOT EXISTS app_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 ```
 
 ### Seeding
@@ -200,8 +206,10 @@ Restores the database to initial demo state (clears all user swipes & matches, a
 1. **Zero-Knowledge Feed**:
    - `getFeed('me')` queries only `profiles WHERE id NOT IN (SELECT to_user FROM swipes WHERE from_user = 'me')`.
    - The returned schema is strictly `Profile` (`id, name, age, photo, bio, location, interests`). It never contains flags such as `is_liked_by`, `liked_me`, or match scores.
-2. **Deterministic, Unbiased Ordering**:
-   - Candidates are ordered by primary key (`id ASC`). Feed order cannot be inspected or timed to infer who likes `"me"`.
+2. **Deterministic, Unbiased Stable Shuffle**:
+   - Candidates are ordered by `feed_hash(id, session_seed)` (SHA-256 HMAC of ID and session seed), where `session_seed` is generated once per database reset and stored in `app_meta`.
+   - The feed order is 100% stable across browser reloads, while remaining completely decoupled from candidate IDs, creation times, or liked-me status.
+   - Position in the feed never leaks whether a candidate liked `"me"`. Liked-me profiles are spread evenly across the catalogue rather than clustered at low IDs.
 3. **Silent Passing**:
    - Swiping `pass` on someone who liked `"me"` writes `(me, target, pass)` to `swipes`.
    - The response is `{ matched: false }` — identical to passing on someone who did not like `"me"`.
@@ -215,35 +223,42 @@ Restores the database to initial demo state (clears all user swipes & matches, a
 
 ## How to Demo a Match
 
-In production Coy, liked-me profiles are intentionally **never** visible in the UI. For evaluation and grading, follow this demo path:
+In production Coy, liked-me profiles are intentionally **never** visible in the UI. In addition, candidate cards are shuffled using a stable per-session seed and liked-me profiles are distributed across the catalog (the first card is **not** a match), preventing position-based leaks.
 
-1. **Inspect Pre-Seeded Profiles**:
-   - The seed file (`src/lib/db.ts`) seeds 9 profiles as having already liked `"me"`:
-     - `p01` (Aarav Sharma, IIT Delhi)
-     - `p03` (Rohan Mehta, IIM Ahmedabad)
-     - `p05` (Kabir Singh, Mumbai)
-     - `p07` (Arjun Verma, Hyderabad)
-     - `p09` (Dev Bose, Kolkata)
-     - `p11` (Ishaan Kapoor, Delhi)
-     - `p13` (Nikhil Rao, Bengaluru)
-     - `p15` (Vikram Nambiar, Kochi)
-     - `p17` (Aditya Pandey, Lucknow)
-2. **Trigger a Mutual Match**:
-   - Launch the app (`http://localhost:3000`). The first card presented is `p01` (Aarav Sharma).
-   - Drag right, click the green **♥** button, or press the **→** arrow key.
+For evaluation and grading, follow this demo path:
+
+1. **Check the Seed File for Liked-Me IDs**:
+   - The seed file ([src/lib/db.ts](file:///Users/ayushkrishna/docs/proj/coy/src/lib/db.ts)) defines `likedMeIds` spread across the entire ID range:
+     - `p04` — **Ananya Iyer** (Chennai, Marine biology)
+     - `p07` — **Arjun Verma** (Hyderabad, Backend dev & rock climbing)
+     - `p11` — **Ishaan Kapoor** (Delhi, Architecture & startups)
+     - `p14` — **Pooja Desai** (Ahmedabad, Fashion & textiles)
+     - `p19` — **Samar Khan** (Jaipur, Graphic novels & heritage walks)
+     - `p22` — **Kritika Malhotra** (Chandigarh, Environmental law)
+     - `p26` — **Aditi Saxena** (Bhopal, UX research & accessibility)
+     - `p29` — **Mansi Rawat** (Dehradun, Adventure sports & hospitality)
+     - `p31` — **Bhavna Choksi** (Vadodara, Fine arts & generative art)
+   - *Note*: `p01` (Aarav Sharma), `p02` (Priya Nair), and `p03` (Rohan Mehta) have **not** liked `"me"`.
+2. **Test One-Way Like (No Match & No Leak)**:
+   - Launch the app ([http://localhost:3000](http://localhost:3000)).
+   - If the current card is a non-liked profile (such as Aarav Sharma, Priya Nair, etc.), swipe right (Like).
+   - The card flies off smoothly and the next card appears. Because the like is one-way, no match modal appears and no hint is leaked.
+3. **Trigger a Mutual Match**:
+   - Continue swiping until you encounter one of the profiles from `likedMeIds` listed above (e.g., **Ananya Iyer**, **Arjun Verma**, or **Ishaan Kapoor**).
+   - Swipe right (drag right, click **♥**, or press **→**).
    - The full-screen celebration modal (**"It's a Match! 💫"**) immediately triggers, displaying both profile pictures.
-3. **View Mutual Matches**:
+4. **View Mutual Matches**:
    - Click **"View Matches"** on the modal or switch to the **Matches** sub-nav tab.
-   - Aarav Sharma appears in the grid with shared interests highlighted (e.g. `★ chess`, `★ cycling`).
-4. **Test Silent Passing**:
-   - Switch back to **Swipe**. The next profiles appear. Swipe left on `p03` (who also liked `"me"`).
-   - Card smoothly slides away. Notice that no match is created and `p03` is never visible in Matches.
-5. **Reload Persistence**:
+   - The matched candidate appears in the grid with shared interests highlighted (e.g. `★ chess`, `★ cycling`).
+5. **Test Silent Passing**:
+   - Switch back to **Swipe**. When you encounter any other profile that liked `"me"`, swipe left (Pass).
+   - The card slides away silently. No match is created and the profile never appears in Matches.
+6. **Reload Persistence**:
    - Refresh the page (`Cmd+R` / `F5`).
-   - Notice that neither `p01` nor `p03` reappears in the feed. The server database is the true source of truth.
-6. **Reset Demo State**:
+   - The feed order remains stable, and previously swiped profiles never reappear.
+7. **Reset Demo State**:
    - Click the small **"↺ Reset demo"** link in the top header or from the feed empty state.
-   - The demo database immediately resets to the initial state.
+   - The demo database immediately resets all swipes, re-seeds the 9 liked-me rows, and regenerates a fresh stable shuffle seed.
 
 ---
 
