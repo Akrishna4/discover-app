@@ -1,4 +1,9 @@
-# Coy – Discover Feature
+# discover-app
+
+Built as a take-home assignment for the Coy SDE Intern role.
+
+**Live demo:** https://discover-app.onrender.com  
+(Hosted on Render's free tier: the first load after inactivity can take ~50s, and data resets whenever the service restarts.)
 
 > **Coy** is a consumer app whose core promise is **privacy**: you never learn who likes you unless the feeling is mutual.
 
@@ -87,7 +92,7 @@ CREATE TABLE IF NOT EXISTS app_meta (
 
 ### Seeding
 - **32 realistic profiles**: Diverse Indian names, colleges (IIT Delhi, BITS Pilani, IIM Ahmedabad, VJTI Mumbai, etc.) and cities (Bengaluru, Pune, Kolkata, Kochi, Jaipur, etc.), each with 3–5 interests and deterministic placeholder photos (`https://picsum.photos/seed/<id>/600/800`).
-- **9 pre-seeded "liked-me" rows**: `p01`, `p03`, `p05`, `p07`, `p09`, `p11`, `p13`, `p15`, `p17` have already swiped `like` on `"me"`.
+- **9 pre-seeded "liked-me" rows**: `p04`, `p07`, `p11`, `p14`, `p19`, `p22`, `p26`, `p29`, `p31` have already swiped `like` on `"me"`.
 - **Idempotency**: All seed statements use `INSERT OR IGNORE` and are wrapped in database transactions.
 
 ---
@@ -128,7 +133,7 @@ Submits a swipe decision (`like` or `pass`). Runs atomically in an SQLite transa
 - **Request Body**:
 ```json
 {
-  "profileId": "p01",
+  "profileId": "p04",
   "action": "like"
 }
 ```
@@ -138,13 +143,13 @@ Submits a swipe decision (`like` or `pass`). Runs atomically in an SQLite transa
     {
       "matched": true,
       "profile": {
-        "id": "p01",
-        "name": "Aarav Sharma",
-        "age": 22,
-        "photo": "https://picsum.photos/seed/p01/600/800",
-        "bio": "CS undergrad obsessed with distributed systems and midnight chai.",
-        "location": "IIT Delhi",
-        "interests": ["distributed systems", "chess", "hindi rap", "photography", "cycling"]
+        "id": "p04",
+        "name": "Ananya Iyer",
+        "age": 21,
+        "photo": "https://picsum.photos/seed/p04/600/800",
+        "bio": "Marine biology enthusiast, amateur chef and terrible dancer.",
+        "location": "Chennai",
+        "interests": ["marine biology", "cooking", "dancing", "classical literature"]
       }
     }
     ```
@@ -171,15 +176,15 @@ Returns the list of confirmed mutual matches for `"me"`.
 [
   {
     "profile": {
-      "id": "p01",
-      "name": "Aarav Sharma",
-      "age": 22,
-      "photo": "https://picsum.photos/seed/p01/600/800",
-      "bio": "CS undergrad obsessed with distributed systems and midnight chai.",
-      "location": "IIT Delhi",
-      "interests": ["distributed systems", "chess", "hindi rap", "photography", "cycling"]
+      "id": "p04",
+      "name": "Ananya Iyer",
+      "age": 21,
+      "photo": "https://picsum.photos/seed/p04/600/800",
+      "bio": "Marine biology enthusiast, amateur chef and terrible dancer.",
+      "location": "Chennai",
+      "interests": ["marine biology", "cooking", "dancing", "classical literature"]
     },
-    "matchedAt": "2026-11-18 14:30:23"
+    "matchedAt": "2026-11-18 15:57:45"
   }
 ]
 ```
@@ -225,6 +230,8 @@ Restores the database to initial demo state (clears all user swipes & matches, a
 
 In production Coy, liked-me profiles are intentionally **never** visible in the UI. In addition, candidate cards are shuffled using a stable per-session seed and liked-me profiles are distributed across the catalog (the first card is **not** a match), preventing position-based leaks.
 
+On the live demo, click Reset demo first, then swipe right on any liked-me profile ID listed in `src/lib/db.ts` to see the match overlay.
+
 For evaluation and grading, follow this demo path:
 
 1. **Check the Seed File for Liked-Me IDs**:
@@ -240,7 +247,7 @@ For evaluation and grading, follow this demo path:
      - `p31` — **Bhavna Choksi** (Vadodara, Fine arts & generative art)
    - *Note*: `p01` (Aarav Sharma), `p02` (Priya Nair), and `p03` (Rohan Mehta) have **not** liked `"me"`.
 2. **Test One-Way Like (No Match & No Leak)**:
-   - Launch the app ([http://localhost:3000](http://localhost:3000)).
+   - Launch the app ([http://localhost:3000](http://localhost:3000) or on the live demo).
    - If the current card is a non-liked profile (such as Aarav Sharma, Priya Nair, etc.), swipe right (Like).
    - The card flies off smoothly and the next card appears. Because the like is one-way, no match modal appears and no hint is leaked.
 3. **Trigger a Mutual Match**:
@@ -278,7 +285,7 @@ nvm use 22
 # 2. Install dependencies
 npm install
 
-# 3. Run test suite (11 Vitest tests verifying all matching & privacy rules)
+# 3. Run test suite (13 Vitest tests verifying all matching & privacy rules)
 npm test
 
 # 4. Start local development server
@@ -296,7 +303,16 @@ Open [http://localhost:3000](http://localhost:3000) in your mobile browser or de
 | **SQLite (`better-sqlite3`)** | Local-file storage; cannot scale horizontally across serverless workers. | Zero infrastructure overhead, synchronous C++ bindings, ACID transactions for atomic mutual match creation, perfect for local demo and evaluation. |
 | **Optimistic UI with Rollback** | Client displays swipe animation before API resolves; network errors require card restoration. | Produces the snappy, fluid 60fps swipe feel expected of modern consumer apps. On failure, card returns to the top of the deck and a toast informs the user. |
 | **Transactional Match Writing** | Synchronous query to check if target liked `"me"`. | Guarantees instant match modal feedback without polling or WebSockets. |
-| **Deterministic ID Ordering** | Predictable card order. | Fully eliminates any bias or timing leak that could reveal who liked `"me"`. |
+| **Deterministic Seed Shuffle** | Requires persisting a seed in SQLite metadata. | Fully eliminates any bias or position-based timing leak that could reveal who liked `"me"`, while ensuring reload stability. |
+
+---
+
+## Known Limitations
+
+- **Swiping right on every profile reveals who liked you**: Because a match only appears for profiles that liked you back, a malicious user could blindly like all candidates to learn the full set of admirers. A production app must enforce daily swipe quotas or rate limits to mitigate this probing vector.
+- **Public demo reset endpoint (`/api/reset`)**: The reset endpoint is unauthenticated for demo convenience. Production would remove or gate this behind administrator permissions.
+- **Shared single-user identity in live demo**: The live demo uses a single shared `"me"` user session. Concurrent visitors share the same swipe history and match state; use the **"Reset demo"** button to restore the initial evaluation state at any time.
+- **Ephemeral SQLite storage on free tier**: On Render's free tier, the local SQLite database is hosted on an ephemeral filesystem, meaning data resets to the initial seed state whenever the service restarts or redeploys.
 
 ---
 
